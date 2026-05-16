@@ -29,11 +29,21 @@ class Agent:
         self._init_llm()
 
     def _init_llm(self):
-        """Initialize LLM client(s). Gemini primary, Groq fallback."""
-        self.gemini_model = None
+        """Initialize LLM client(s). Groq primary, Gemini fallback."""
         self.groq_client = None
+        self.gemini_model = None
 
-        # Try Gemini
+        # Primary: Groq (fast, reliable)
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if groq_key:
+            try:
+                from groq import Groq
+                self.groq_client = Groq(api_key=groq_key)
+                print("[Agent] Groq client initialized (primary)")
+            except Exception as e:
+                print(f"[Agent] Groq init failed: {e}")
+
+        # Fallback: Gemini
         gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if gemini_key:
             try:
@@ -48,23 +58,12 @@ class Agent:
                         max_output_tokens=2048,
                     ),
                 )
-                print("[Agent] Gemini 2.0 Flash initialized")
+                print("[Agent] Gemini 2.0 Flash initialized (fallback)")
             except Exception as e:
                 print(f"[Agent] Gemini init failed: {e}")
 
-        # Try Groq
-        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-        if groq_key:
-            try:
-                # pyrefly: ignore [missing-import]
-                from groq import Groq
-                self.groq_client = Groq(api_key=groq_key)
-                print("[Agent] Groq client initialized (fallback)")
-            except Exception as e:
-                print(f"[Agent] Groq init failed: {e}")
-
-        if not self.gemini_model and not self.groq_client:
-            print("[Agent] WARNING: No LLM configured! Set GEMINI_API_KEY or GROQ_API_KEY")
+        if not self.groq_client and not self.gemini_model:
+            print("[Agent] WARNING: No LLM configured! Set GROQ_API_KEY or GEMINI_API_KEY")
 
     async def chat(self, messages: list[ChatMessage]) -> ChatResponse:
         """
@@ -110,23 +109,10 @@ class Agent:
             )
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call the LLM. Try Gemini first, then cascade through Groq models."""
+        """Call the LLM. Groq primary (fast), Gemini fallback."""
         last_error = None
 
-        # Try Gemini (skip if recently rate-limited via circuit breaker)
-        if self.gemini_model and time.time() > self._gemini_cooldown:
-            try:
-                response = self.gemini_model.generate_content(prompt)
-                return response.text
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                print(f"[Agent] Gemini failed: {error_str[:200]}")
-                if "429" in error_str or "quota" in error_str.lower():
-                    self._gemini_cooldown = time.time() + 60  # Skip for 60s
-                    print("[Agent] Gemini circuit breaker: pausing for 60s")
-
-        # Fallback to Groq (try multiple models)
+        # Primary: Groq (try multiple models for resilience)
         if self.groq_client:
             groq_models = [
                 "llama-3.3-70b-versatile",
@@ -151,10 +137,22 @@ class Agent:
                     error_str = str(e)
                     print(f"[Agent] Groq {model} failed: {error_str[:200]}")
                     last_error = e
-                    # Continue to next model on rate limits AND capacity errors
                     if "429" in error_str or "503" in error_str or "capacity" in error_str.lower():
                         continue
-                    break  # Non-retryable error, stop trying
+                    break
+
+        # Fallback: Gemini (skip if recently rate-limited)
+        if self.gemini_model and time.time() > self._gemini_cooldown:
+            try:
+                print("[Agent] Falling back to Gemini...")
+                response = self.gemini_model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                print(f"[Agent] Gemini failed: {error_str[:200]}")
+                if "429" in error_str or "quota" in error_str.lower():
+                    self._gemini_cooldown = time.time() + 300  # Skip for 5 min
 
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 
