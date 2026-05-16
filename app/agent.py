@@ -25,6 +25,7 @@ class Agent:
     def __init__(self, catalog: Catalog, retriever: Retriever):
         self.catalog = catalog
         self.retriever = retriever
+        self._gemini_cooldown = 0  # Circuit breaker timestamp
         self._init_llm()
 
     def _init_llm(self):
@@ -55,6 +56,7 @@ class Agent:
         groq_key = os.environ.get("GROQ_API_KEY", "").strip()
         if groq_key:
             try:
+                # pyrefly: ignore [missing-import]
                 from groq import Groq
                 self.groq_client = Groq(api_key=groq_key)
                 print("[Agent] Groq client initialized (fallback)")
@@ -108,11 +110,11 @@ class Agent:
             )
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call the LLM. Try Gemini first with retries, then Groq fallback."""
+        """Call the LLM. Try Gemini first, then cascade through Groq models."""
         last_error = None
 
-        # Try Gemini (single attempt — if quota exceeded, fall through to Groq)
-        if self.gemini_model:
+        # Try Gemini (skip if recently rate-limited via circuit breaker)
+        if self.gemini_model and time.time() > self._gemini_cooldown:
             try:
                 response = self.gemini_model.generate_content(prompt)
                 return response.text
@@ -120,7 +122,9 @@ class Agent:
                 last_error = e
                 error_str = str(e)
                 print(f"[Agent] Gemini failed: {error_str[:200]}")
-                # Don't retry on quota errors — fall through to Groq immediately
+                if "429" in error_str or "quota" in error_str.lower():
+                    self._gemini_cooldown = time.time() + 60  # Skip for 60s
+                    print("[Agent] Gemini circuit breaker: pausing for 60s")
 
         # Fallback to Groq (try multiple models)
         if self.groq_client:
@@ -147,8 +151,10 @@ class Agent:
                     error_str = str(e)
                     print(f"[Agent] Groq {model} failed: {error_str[:200]}")
                     last_error = e
-                    if "429" not in error_str:
-                        break  # Non-rate-limit error, stop trying
+                    # Continue to next model on rate limits AND capacity errors
+                    if "429" in error_str or "503" in error_str or "capacity" in error_str.lower():
+                        continue
+                    break  # Non-retryable error, stop trying
 
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 

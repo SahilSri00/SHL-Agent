@@ -46,17 +46,14 @@ class CatalogItem:
         self.test_type_code = ",".join(codes) if codes else "K"
 
     def compact_repr(self) -> str:
-        """Compact text for embedding/retrieval indexing."""
-        levels = ", ".join(self.job_levels) if self.job_levels else "General"
-        langs = ", ".join(self.languages[:3]) if self.languages else "—"
-        if len(self.languages) > 3:
-            langs += f" (+{len(self.languages) - 3} more)"
+        """Compact text for LLM prompt — kept short to minimize tokens."""
         dur = self.duration if self.duration else "—"
+        desc = self.description[:150] + "..." if len(self.description) > 150 else self.description
         return (
             f"{self.name} | Type: {self.test_type_code} | "
-            f"Keys: {', '.join(self.keys)} | Duration: {dur} | "
-            f"Levels: {levels} | Languages: {langs}\n"
-            f"  Description: {self.description}"
+            f"Duration: {dur} | "
+            f"Levels: {', '.join(self.job_levels[:3]) if self.job_levels else 'General'}\n"
+            f"  {desc}"
         )
 
     def search_text(self) -> str:

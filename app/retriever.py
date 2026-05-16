@@ -71,8 +71,8 @@ class Retriever:
     def retrieve(
         self,
         messages: list[dict],
-        top_k: int = 25,
-        max_candidates: int = 30,
+        top_k: int = 20,
+        max_candidates: int = 25,
     ) -> list[CatalogItem]:
         """
         Retrieve the most relevant assessments for the conversation.
